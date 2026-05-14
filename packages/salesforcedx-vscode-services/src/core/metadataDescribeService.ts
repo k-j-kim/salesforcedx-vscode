@@ -18,6 +18,7 @@ import * as SubscriptionRef from 'effect/SubscriptionRef';
 import { ChannelService } from '../vscode/channelService';
 import { ExtensionContextService } from '../vscode/extensionContextService';
 import { SettingsService } from '../vscode/settingsService';
+import { ComponentSetService } from './componentSetService';
 import { ConnectionService } from './connectionService';
 import { getDefaultOrgRef } from './defaultOrgRef';
 import { FilePropertiesSchema } from './schemas/fileProperties';
@@ -66,7 +67,8 @@ export class MetadataDescribeService extends Effect.Service<MetadataDescribeServ
     ConnectionService.Default,
     SettingsService.Default,
     ExtensionContextService.Default,
-    ChannelService.Default
+    ChannelService.Default,
+    ComponentSetService.Default
   ],
   effect: Effect.gen(function* () {
     const connectionService = yield* ConnectionService;
@@ -413,6 +415,37 @@ export class MetadataDescribeService extends Effect.Service<MetadataDescribeServ
       return yield* listMetadataCache.get(key);
     });
 
+    const queryOrgMemberTypes = Effect.fn('MetadataDescribeService.queryOrgMemberTypes')(function* () {
+      const { tracksSource } = yield* SubscriptionRef.get(yield* getDefaultOrgRef());
+      if (tracksSource !== true) return new Set<string>();
+      const conn = yield* connectionService.getConnection();
+      return yield* Effect.tryPromise({
+        try: async () => {
+          const result = await conn.tooling.query<{ MemberType: string }>(
+            'SELECT MemberType FROM SourceMember GROUP BY MemberType'
+          );
+          return new Set(result.records.map(r => r.MemberType));
+        },
+        catch: () => new Set<string>()
+      }).pipe(Effect.catchAll(() => Effect.succeed(new Set<string>())));
+    });
+
+    const describeTypesWithContent = Effect.fn('MetadataDescribeService.describeTypesWithContent')(function* () {
+      const componentSetService = yield* ComponentSetService;
+      const [allTypes, orgMemberTypes, projectComponentSet] = yield* Effect.all(
+        [describe(), queryOrgMemberTypes(), componentSetService.getComponentSetFromProjectDirectories()],
+        { concurrency: 'unbounded' }
+      );
+
+      const localTypeNames = Array.from(projectComponentSet).reduce(
+        (acc, comp) => acc.add(comp.type.name),
+        new Set<string>()
+      );
+
+      const typesWithContent = new Set([...localTypeNames, ...orgMemberTypes]);
+      return typesWithContent.size > 0 ? allTypes.filter(t => typesWithContent.has(t.xmlName)) : allTypes;
+    });
+
     return {
       /** Clears the cached Metadata API describe result for the current org. */
       invalidateDescribe,
@@ -445,7 +478,8 @@ export class MetadataDescribeService extends Effect.Service<MetadataDescribeServ
        * side-effect. Returns an Effect<Stream> — yield* once to get the Stream,
        * then consume it.
        */
-      describeCustomObjects
+      describeCustomObjects,
+      describeTypesWithContent
     };
   })
 }) {}
